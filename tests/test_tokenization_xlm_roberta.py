@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2018 The Google AI Language Team Authors.
+# Copyright 2020 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,21 +14,28 @@
 # limitations under the License.
 
 
+import itertools
 import os
+import pickle
 import unittest
 
-from transformers.tokenization_xlm_roberta import SPIECE_UNDERLINE, XLMRobertaTokenizer
+from transformers import SPIECE_UNDERLINE, XLMRobertaTokenizer, XLMRobertaTokenizerFast
+from transformers.file_utils import cached_property
+from transformers.testing_utils import require_sentencepiece, require_tokenizers, slow
 
 from .test_tokenization_common import TokenizerTesterMixin
-from .utils import slow
 
 
 SAMPLE_VOCAB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures/test_sentencepiece.model")
 
 
+@require_sentencepiece
+@require_tokenizers
 class XLMRobertaTokenizationTest(TokenizerTesterMixin, unittest.TestCase):
 
     tokenizer_class = XLMRobertaTokenizer
+    rust_tokenizer_class = XLMRobertaTokenizerFast
+    test_rust_tokenizer = True
 
     def setUp(self):
         super().setUp()
@@ -36,14 +43,6 @@ class XLMRobertaTokenizationTest(TokenizerTesterMixin, unittest.TestCase):
         # We have a SentencePiece fixture for testing
         tokenizer = XLMRobertaTokenizer(SAMPLE_VOCAB, keep_accents=True)
         tokenizer.save_pretrained(self.tmpdirname)
-
-    def get_tokenizer(self, **kwargs):
-        return XLMRobertaTokenizer.from_pretrained(self.tmpdirname, **kwargs)
-
-    def get_input_output_texts(self):
-        input_text = "This is a test"
-        output_text = "This is a test"
-        return input_text, output_text
 
     def test_full_tokenizer(self):
         tokenizer = XLMRobertaTokenizer(SAMPLE_VOCAB, keep_accents=True)
@@ -121,22 +120,79 @@ class XLMRobertaTokenizationTest(TokenizerTesterMixin, unittest.TestCase):
             ],
         )
 
+    def test_subword_regularization_tokenizer(self):
+        # Subword regularization is only available for the slow tokenizer.
+        tokenizer = XLMRobertaTokenizer(
+            SAMPLE_VOCAB, keep_accents=True, sp_model_kwargs={"enable_sampling": True, "alpha": 0.1, "nbest_size": -1}
+        )
+
+        # Subword regularization augments training data with subword sampling.
+        # This has a random component. We test if the tokenizer generates different
+        # results when subword regularization is enabled.
+        tokens_list = []
+        for _ in range(5):
+            tokens_list.append(tokenizer.tokenize("This is a test for subword regularization."))
+
+        # the list of different pairs of tokens_list
+        combinations = itertools.combinations(tokens_list, 2)
+
+        all_equal = True
+        for combination in combinations:
+            if combination[0] != combination[1]:
+                all_equal = False
+
+        self.assertFalse(all_equal)
+
+    def test_pickle_subword_regularization_tokenizer(self):
+        """Google pickle __getstate__ __setstate__ if you are struggling with this."""
+        # Subword regularization is only available for the slow tokenizer.
+        sp_model_kwargs = {"enable_sampling": True, "alpha": 0.1, "nbest_size": -1}
+        tokenizer = XLMRobertaTokenizer(SAMPLE_VOCAB, keep_accents=True, sp_model_kwargs=sp_model_kwargs)
+        tokenizer_bin = pickle.dumps(tokenizer)
+        tokenizer_new = pickle.loads(tokenizer_bin)
+
+        self.assertIsNotNone(tokenizer_new.sp_model_kwargs)
+        self.assertTrue(isinstance(tokenizer_new.sp_model_kwargs, dict))
+        self.assertEqual(tokenizer_new.sp_model_kwargs, sp_model_kwargs)
+
+    @cached_property
+    def big_tokenizer(self):
+        return XLMRobertaTokenizer.from_pretrained("xlm-roberta-base")
+
+    def test_rust_and_python_full_tokenizers(self):
+        if not self.test_rust_tokenizer:
+            return
+
+        tokenizer = self.get_tokenizer()
+        rust_tokenizer = self.get_rust_tokenizer()
+
+        sequence = "I was born in 92000, and this is falsé."
+
+        tokens = tokenizer.tokenize(sequence)
+        rust_tokens = rust_tokenizer.tokenize(sequence)
+        self.assertListEqual(tokens, rust_tokens)
+
+        ids = tokenizer.encode(sequence, add_special_tokens=False)
+        rust_ids = rust_tokenizer.encode(sequence, add_special_tokens=False)
+        self.assertListEqual(ids, rust_ids)
+
+        rust_tokenizer = self.get_rust_tokenizer()
+        ids = tokenizer.encode(sequence)
+        rust_ids = rust_tokenizer.encode(sequence)
+        self.assertListEqual(ids, rust_ids)
+
     @slow
     def test_tokenization_base_easy_symbols(self):
-        tokenizer = XLMRobertaTokenizer.from_pretrained("xlm-roberta-base")
-
         symbols = "Hello World!"
         original_tokenizer_encodings = [0, 35378, 6661, 38, 2]
         # xlmr = torch.hub.load('pytorch/fairseq', 'xlmr.base')  # xlmr.large has same tokenizer
         # xlmr.eval()
         # xlmr.encode(symbols)
 
-        self.assertListEqual(original_tokenizer_encodings, tokenizer.encode(symbols))
+        self.assertListEqual(original_tokenizer_encodings, self.big_tokenizer.encode(symbols))
 
     @slow
     def test_tokenization_base_hard_symbols(self):
-        tokenizer = XLMRobertaTokenizer.from_pretrained("xlm-roberta-base")
-
         symbols = 'This is a very long text with a lot of weird characters, such as: . , ~ ? ( ) " [ ] ! : - . Also we will add words that should not exsist and be tokenized to <unk>, such as saoneuhaoesuth'
         original_tokenizer_encodings = [
             0,
@@ -209,4 +265,4 @@ class XLMRobertaTokenizationTest(TokenizerTesterMixin, unittest.TestCase):
         # xlmr.eval()
         # xlmr.encode(symbols)
 
-        self.assertListEqual(original_tokenizer_encodings, tokenizer.encode(symbols))
+        self.assertListEqual(original_tokenizer_encodings, self.big_tokenizer.encode(symbols))
