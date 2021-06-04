@@ -41,7 +41,7 @@ TF_WAV_2_VEC_2_PRETRAINED_MODEL_ARCHIVE_LIST = [
     # See all Wav2Vec2 models at https://huggingface.co/models?filter=wav2vec2
 ]
 
-LARGE_NEGATIVE = -1e8
+LARGE_NEGATIVE = -10000.0
 
 
 def _compute_mask_indices(
@@ -346,20 +346,26 @@ class TFWav2Vec2GroupNorm(tf.keras.layers.Layer):
         return broadcast_shape
 
 
-class TFWav2Vec2WeightNormConv1D(tf.keras.layers.Conv1D):
-    """Adapted from https://www.tensorflow.org/probability/api_docs/python/tfp/layers/weight_norm/WeightNorm"""
-
-    def __init__(self, filters, kernel_size, groups, explicit_padding, **kwargs):
-        super().__init__(
-            filters=filters,
-            kernel_size=kernel_size,
-            groups=groups,
-            padding="valid",
-            use_bias=True,
-            bias_initializer="he_normal",
-            **kwargs,
-        )
-        self.explicit_padding = explicit_padding
+class TFWav2Vec2WeightNormConv1D(tf.keras.layers.Layer):
+    def __init__(
+        self,
+        filters,
+        kernel_size,
+        groups,
+        padding,
+        kernel_initializer="he_normal",
+        strides=1,
+        use_bias=True,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.filters = filters
+        self.kernel_size = kernel_size
+        self.strides = strides
+        self.groups = groups
+        self.padding = padding
+        self.use_bias = use_bias
+        self.kernel_initializer = kernel_initializer
         self.filter_axis = 0
         self.initialized = False
 
@@ -373,18 +379,25 @@ class TFWav2Vec2WeightNormConv1D(tf.keras.layers.Conv1D):
 
         # `self.kernel_norm_axes` is determined by `self.filter_axis` and the rank
         # of the layer kernel, and is thus statically known.
-        self.kernel = tf.nn.l2_normalize(self.weight_v, axis=self.kernel_norm_axes) * self.weight_g
+        self.weight_v.assign(tf.nn.l2_normalize(self.weight_v, axis=self.kernel_norm_axes) * self.weight_g)
 
     def build(self, input_shape):
+        batch_size, seq_length, channels = tf.TensorShape(input_shape).as_list()
+
         if not self.built:
-            super().build(input_shape)
-            kernel_norm_axes = list(range(self.kernel.shape.rank))
+
+            self.weight_v = self.add_weight(
+                name="weight_v",
+                shape=(self.kernel_size, int(self.filters) // self.groups, self.filters),
+                trainable=True,
+                initializer=self.kernel_initializer,
+            )
+
+            kernel_norm_axes = list(range(self.weight_v.shape.rank))
             kernel_norm_axes.pop(self.filter_axis)
             # Convert `kernel_norm_axes` from a list to a constant Tensor to allow
             # TF checkpoint saving.
             self.kernel_norm_axes = tf.constant(kernel_norm_axes)
-            self.kernel = tf.Variable(self.kernel, name="weight_v", trainable=True)
-            self.weight_v = self.kernel
 
             self.weight_g = self.add_weight(
                 name="weight_g",
@@ -393,16 +406,39 @@ class TFWav2Vec2WeightNormConv1D(tf.keras.layers.Conv1D):
                 dtype=self.weight_v.dtype,
                 trainable=True,
             )
-            self.bias = self.add_weight(name="bias", shape=(self.filters,), initializer="zeros", trainable=True)
+
+            if self.use_bias:
+                self.bias = self.add_weight(
+                    name="bias",
+                    shape=(self.filters,),
+                    initializer="zeros",
+                    trainable=True,
+                )
+            super().build(input_shape)
 
     def call(self, inputs):
-        if not self.initialized:
-            self._init_norm()
-            self.initialized = True
+        # if not self.initialized:
+        #    self._init_norm()
+        #    self.initialized = True
 
-        self._compute_weights()
-        output = tf.pad(inputs, ((0, 0), (self.explicit_padding, self.explicit_padding), (0, 0)))
-        output = super().call(output)
+        kernel = tf.nn.l2_normalize(self.weight_v, axis=self.kernel_norm_axes) * self.weight_g
+        kernel = tf.split(kernel, self.groups, axis=-1)
+        output = tf.pad(inputs, ((0, 0), (self.padding, self.padding), (0, 0)))
+        output = tf.split(output, self.groups, axis=-1)
+
+        output = [
+            tf.nn.conv1d(
+                i,
+                k,
+                data_format="NWC",
+                stride=self.strides,
+                padding="VALID",
+            )
+            for i, k in zip(output, kernel)
+        ]
+        output = tf.concat(output, axis=-1)
+        if self.use_bias:
+            output = tf.nn.bias_add(output, self.bias)
         return output
 
 
@@ -482,7 +518,7 @@ class TFWav2Vec2PositionalConvEmbedding(tf.keras.layers.Layer):
             filters=config.hidden_size,
             kernel_size=config.num_conv_pos_embeddings,
             groups=config.num_conv_pos_embedding_groups,
-            explicit_padding=config.num_conv_pos_embeddings // 2,
+            padding=config.num_conv_pos_embeddings // 2,
             name="conv",
         )
         self.padding = TFWav2Vec2SamePadLayer(config.num_conv_pos_embeddings)
@@ -1024,6 +1060,7 @@ class TFWav2Vec2MainLayer(tf.keras.layers.Layer):
             # compute real output lengths according to convolution formula
             output_lengths = self._get_feat_extract_output_lengths(tf.reduce_sum(inputs["attention_mask"], -1))
             attention_mask = tf.sequence_mask(output_lengths, dtype=hidden_states.dtype)
+            print("attn", attention_mask.shape)
 
         hidden_states = self.feature_projection(hidden_states, training=inputs["training"])
 
