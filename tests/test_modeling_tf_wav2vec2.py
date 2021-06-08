@@ -20,6 +20,7 @@ import unittest
 import numpy as np
 
 from transformers import Wav2Vec2Config, is_tf_available
+from transformers.models.wav2vec2.modeling_tf_wav2vec2 import _compute_mask_indices
 from transformers.testing_utils import require_datasets, require_soundfile, require_tf, slow
 
 from .test_configuration_common import ConfigTester
@@ -152,7 +153,24 @@ class TFWav2Vec2ModelTester:
             self.parent.assertTrue(np.allclose(output, batch_output, atol=1e-3))
 
     def check_ctc_loss(self, config, input_values, *args):
-        pass
+        model = TFWav2Vec2ForCTC(config)
+
+        input_values = input_values[:3]
+        attention_mask = tf.ones(input_values.shape)
+
+        input_lengths = [input_values.shape[-1] // i for i in [4, 2, 1]]
+        max_length_labels = model.wav2vec2._get_feat_extract_output_lenghts(input_lengths)
+        labels = ids_tensor((input_values.shape[0], min(max_length_labels) - 1), model.config.vocab_size)
+
+        length_mask = tf.sequence_mask(input_lengths, dtype=tf.float32)
+
+        input_values = input_values * length_mask
+        attention_mask = attention_mask * length_mask
+
+        ctc_loss = model(input_values, attention_mask=attention_mask, labels=labels).loss
+        print(ctc_loss)
+
+        self.parent.assertTrue(abs(labels.shape[0] * labels.shape[1] * ctc_loss))
 
     def check_training(self, config, input_values, *args):
         pass
@@ -317,6 +335,37 @@ class TFWav2Vec2RobustModelTest(TFModelTesterMixin, unittest.TestCase):
     def test_model_from_pretrained(self):
         model = TFWav2Vec2Model.from_pretrained("facebook/wav2vec2-base-960h")
         self.assertIsNotNone(model)
+
+
+@require_tf
+class TFWav2Vec2UtilsTest(unittest.TestCase):
+    def test_compute_mask_indices(self):
+        batch_size = 4
+        sequence_length = 60
+        mask_prob = 0.5
+        mask_length = 1
+
+        mask = _compute_mask_indices((batch_size, sequence_length), mask_prob, mask_length)
+
+        for batch_sum in tf.reduce_sum(mask, -1):
+            self.assertIn(
+                int(batch_sum),
+                list(range(int(mask_prob // mask_length * sequence_length), int(mask_prob * sequence_length))),
+            )
+
+    def test_compute_mask_indices_overlap(self):
+        batch_size = 4
+        sequence_length = 60
+        mask_prob = 0.5
+        mask_length = 4
+
+        mask = _compute_mask_indices((batch_size, sequence_length), mask_prob, mask_length)
+
+        for batch_sum in tf.reduce_sum(mask, -1):
+            self.assertIn(
+                int(batch_sum),
+                list(range(int(mask_prob // mask_length * sequence_length), int(mask_prob * sequence_length))),
+            )
 
 
 @require_tf

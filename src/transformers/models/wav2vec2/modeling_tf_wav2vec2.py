@@ -1032,9 +1032,9 @@ class TFWav2Vec2MainLayer(tf.keras.layers.Layer):
         position_ids: Optional[tf.Tensor] = None,
         head_mask: Optional[tf.Tensor] = None,
         inputs_embeds: Optional[tf.Tensor] = None,
-        output_attentions: Optional[tf.Tensor] = None,
-        output_hidden_states: Optional[tf.Tensor] = None,
-        return_dict: Optional[bool] = None,
+        output_attentions: Optional[bool] = False,
+        output_hidden_states: Optional[bool] = False,
+        return_dict: Optional[bool] = True,
         training: bool = False,
         **kwargs: Any,
     ):
@@ -1054,13 +1054,12 @@ class TFWav2Vec2MainLayer(tf.keras.layers.Layer):
             kwargs_call=kwargs,
         )
 
-        hidden_states = self.feature_extractor(tf.cast(inputs["input_ids"], tf.float32), training=inputs["training"])
+        hidden_states = self.feature_extractor(inputs["input_ids"], training=inputs["training"])
 
         if inputs["attention_mask"] is not None:
             # compute real output lengths according to convolution formula
             output_lengths = self._get_feat_extract_output_lengths(tf.reduce_sum(inputs["attention_mask"], -1))
             attention_mask = tf.sequence_mask(output_lengths, dtype=hidden_states.dtype)
-            print("attn", attention_mask.shape)
 
         hidden_states = self.feature_projection(hidden_states, training=inputs["training"])
 
@@ -1223,9 +1222,9 @@ class TFWav2Vec2Model(TFWav2Vec2PreTrainedModel):
         position_ids: Optional[tf.Tensor] = None,
         head_mask: Optional[tf.Tensor] = None,
         inputs_embeds: Optional[tf.Tensor] = None,
-        output_attentions: Optional[tf.Tensor] = None,
-        output_hidden_states: Optional[tf.Tensor] = None,
-        return_dict: Optional[bool] = None,
+        output_attentions: Optional[bool] = False,
+        output_hidden_states: Optional[bool] = False,
+        return_dict: Optional[bool] = True,
         training: bool = False,
         **kwargs: Any,
     ) -> Union[TFBaseModelOutput, Tuple[tf.Tensor]]:
@@ -1410,7 +1409,7 @@ class TFWav2Vec2ForCTC(TFWav2Vec2PreTrainedModel):
             attention_mask = (
                 attention_mask if attention_mask is not None else tf.ones_like(inputs["input_ids"], dtype=tf.float32)
             )
-            input_lengths = self._get_feat_extract_output_lengths(tf.sum(attention_mask, axis=-1))
+            input_lengths = self._get_feat_extract_output_lengths(tf.reduce_sum(attention_mask, axis=-1))
 
             labels_mask = labels >= 0
             target_lengths = tf.reduce_sum(labels_mask, axis=-1)
